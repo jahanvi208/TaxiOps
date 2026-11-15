@@ -1,0 +1,49 @@
+# Render Blueprint. These services use PAID instances; MLflow stores metadata/artifacts on disk.
+services:
+  - type: web
+    name: taxiops-mlflow
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    dockerCommand: >-
+      mlflow server --app-name basic-auth
+      --backend-store-uri sqlite:////mlflow/backend.db
+      --serve-artifacts --artifacts-destination /mlflow/artifacts
+      --host 0.0.0.0 --port 10000 --allowed-hosts '*'
+    disk:
+      name: mlflow-state
+      mountPath: /mlflow
+      sizeGB: 5
+    envVars:
+      - key: MLFLOW_AUTH_CONFIG_PATH
+        value: /app/mlflow_auth.ini
+      - key: MLFLOW_AUTH_ADMIN_USERNAME
+        value: admin
+      - key: MLFLOW_AUTH_ADMIN_PASSWORD
+        sync: false
+      - key: MLFLOW_FLASK_SERVER_SECRET_KEY
+        generateValue: true
+
+  - type: web
+    name: taxiops-api
+    runtime: docker
+    plan: starter
+    dockerfilePath: ./Dockerfile
+    healthCheckPath: /health
+    envVars:
+      - key: MLFLOW_TRACKING_HOSTPORT
+        fromService:
+          name: taxiops-mlflow
+          type: web
+          property: hostport
+      - key: MLFLOW_TRACKING_USERNAME
+        value: admin
+      - key: MLFLOW_TRACKING_PASSWORD
+        fromService:
+          name: taxiops-mlflow
+          type: web
+          envVarKey: MLFLOW_AUTH_ADMIN_PASSWORD
+      - key: TAXIOPS_MODEL_NAME
+        value: TaxiOpsFare
+      - key: TAXIOPS_MODEL_ALIAS
+        value: champion

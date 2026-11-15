@@ -1,0 +1,37 @@
+services:
+  mlflow:
+    build: .
+    command:
+      - mlflow
+      - server
+      - --backend-store-uri
+      - sqlite:////mlflow/backend.db
+      - --artifacts-destination
+      - /mlflow/artifacts
+      - --serve-artifacts
+      - --host
+      - 0.0.0.0
+      - --port
+      - "5000"
+      - --allowed-hosts
+      - "*"
+    volumes:
+      - mlflow_data:/mlflow
+    ports:
+      - "127.0.0.1:5000:5000"
+    restart: unless-stopped
+
+  api:
+    build: .
+    depends_on:
+      - mlflow
+    environment:
+      MLFLOW_TRACKING_URI: http://mlflow:5000
+      TAXIOPS_MODEL_NAME: TaxiOpsFare
+      TAXIOPS_MODEL_ALIAS: champion
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+
+volumes:
+  mlflow_data:

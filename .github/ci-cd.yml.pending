@@ -1,0 +1,174 @@
+name: TaxiOps CI and image release
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install test dependencies
+        run: pip install -e '.[dev]'
+      - name: Lint
+        run: ruff check .
+      - name: Unit and API tests
+        run: pytest -q
+      - name: Build runtime Docker image
+        run: docker build -t taxiops:ci .
+
+  model-regression:
+    if: github.event_name == 'pull_request'
+    needs: quality
+    runs-on: ubuntu-latest
+    env:
+      MLFLOW_TRACKING_URI: ${{ vars.MLFLOW_TRACKING_URI }}
+      MLFLOW_TRACKING_USERNAME: ${{ secrets.MLFLOW_TRACKING_USERNAME }}
+      MLFLOW_TRACKING_PASSWORD: ${{ secrets.MLFLOW_TRACKING_PASSWORD }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install model training dependencies
+        run: pip install -e '.[train]'
+      - name: Require external authenticated MLflow champion
+        run: |
+          if [ -z "$MLFLOW_TRACKING_URI" ] || [ -z "$MLFLOW_TRACKING_USERNAME" ] || [ -z "$MLFLOW_TRACKING_PASSWORD" ]; then
+            echo 'Configure vars.MLFLOW_TRACKING_URI and MLflow username/password secrets.' >&2
+            exit 1
+          fi
+      - name: Download real monthly TLC data
+        run: python scripts/download_data.py 2025-01 2025-02
+      - name: Regression gate against active champion (same February sample)
+        run: >-
+          python -m taxiops.train
+          --max-rows 50000
+          --trials 15
+          --no-promote
+          --require-champion
+      - name: Publish gate measurements
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: model-gate-report
+          path: outputs/training_report.json
+          if-no-files-found: ignore
+
+  # Full real-data integration runs on GitHub's Linux VM, not the developer's laptop.
+  # The initial push to main triggers this automatically. No local Docker needed.
+  cloud-verification:
+    if: github.event_name != 'pull_request'
+    needs: quality
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: pip
+      - name: Install real-data and load-test dependencies
+        run: python -m pip install -e '.[train,dev,loadtest]'
+      - name: Download and DVC-version the official Jan/Feb taxi data
+        run: python scripts/bootstrap_data.py
+      - name: Start actual multi-stage Docker services
+        run: |
+          docker compose up --build -d
+          docker tag "$(docker compose images -q api)" taxiops:dev
+          docker compose ps
+      - name: Train 15 real XGBoost runs and register the champion in MLflow
+        run: python scripts/run_training_only.py --max-rows 50000 --trials 15
+      - name: Smoke-test real registry-backed API (including invalid inputs)
+        run: python scripts/verify_api.py
+      - name: Run real Locust load test on hosted runner
+        run: >-
+          locust -f loadtest/locustfile.py
+          --host http://127.0.0.1:8000
+          --headless -u 5 -r 2 -t 45s
+          --csv outputs/locust --html outputs/locust.html
+          --only-summary --exit-code-on-error 1
+      - name: Collect measured RMSE, run count, tests, Docker size and latency
+        run: python scripts/collect_measurements.py
+      - name: Require measured success (never invent benchmark numbers)
+        run: |
+          python - <<'PY_CHECK'
+          import json
+          from pathlib import Path
+          d = json.loads(Path('outputs/benchmark_evidence.json').read_text())
+          required = ('mlflow_tuning_runs', 'test_count', 'docker_image_bytes',
+                      'best_model_validation_rmse_usd', 'naive_baseline_validation_rmse_usd',
+                      'predict_p50_ms', 'predict_p95_ms', 'predict_requests_per_second')
+          missing = [key for key in required if d.get(key) is None]
+          assert not missing, f'Missing real benchmark evidence: {missing}'
+          assert d['mlflow_tuning_runs'] == 15, d
+          assert d['best_model_validation_rmse_usd'] < d['naive_baseline_validation_rmse_usd'], d
+          assert d['predict_failed_requests'] == 0, d
+          assert d['predict_requests_per_second'] > 0, d
+          print('Verified real-data evidence:', json.dumps(d, indent=2))
+          PY_CHECK
+      - name: Back up the MLflow registry and model artifacts for replay
+        run: |
+          docker compose exec -T mlflow tar -czf - -C /mlflow . > outputs/mlflow_registry_backup.tar.gz
+          tar -czf outputs/dvc_metadata.tar.gz .dvc/config data/raw/*.dvc
+      - name: Capture service logs on failure
+        if: failure()
+        run: docker compose logs --no-color > outputs/docker_services.log || true
+      - name: Publish downloadable verified results, Locust HTML and model registry
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: taxiops-cloud-verification
+          path: |
+            outputs/benchmark_evidence.json
+            outputs/training_report.json
+            outputs/locust_stats.csv
+            outputs/locust_stats_history.csv
+            outputs/locust.html
+            outputs/mlflow_registry_backup.tar.gz
+            outputs/dvc_metadata.tar.gz
+            outputs/docker_services.log
+          if-no-files-found: warn
+          retention-days: 30
+      - name: Shut down hosted services
+        if: always()
+        run: docker compose down || true
+
+  publish:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    needs: [quality, cloud-verification]
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - uses: docker/metadata-action@v5
+        id: meta
+        with:
+          images: ghcr.io/${{ github.repository }}
+          tags: |
+            type=raw,value=latest
+            type=sha
+      - uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}

@@ -1,0 +1,16 @@
+.git
+.github
+.venv
+.dvc
+**/__pycache__
+**/.pytest_cache
+**/.ruff_cache
+/data
+/outputs
+/tests
+/loadtest
+/docs
+*.parquet
+*.sqlite
+*.db
+.env
