@@ -1,7 +1,6 @@
 """Real month-to-month distribution comparisons; descriptive, not simulated drift."""
 from __future__ import annotations
 
-import numpy as np
 import pandas as pd
 from scipy.spatial.distance import jensenshannon
 from scipy.stats import ks_2samp
