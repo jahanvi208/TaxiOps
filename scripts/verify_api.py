@@ -33,7 +33,7 @@ def main() -> None:
             code, health = request("/health")
             if code == 200:
                 break
-        except (urllib.error.URLError, TimeoutError):
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
             time.sleep(2)
     else:
         sys.exit("FastAPI never became reachable; inspect docker compose logs")
