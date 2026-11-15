@@ -7,8 +7,8 @@ from functools import lru_cache
 
 import pandas as pd
 from fastapi import FastAPI, HTTPException, Request, Response
-from pydantic import BaseModel, ConfigDict, Field
 from prometheus_client import CONTENT_TYPE_LATEST, Counter, Histogram, generate_latest
+from pydantic import BaseModel, ConfigDict, Field
 
 from taxiops.config import FEATURE_COLUMNS, MODEL_ALIAS, MODEL_NAME
 from taxiops.registry import load_champion
