@@ -20,7 +20,8 @@ def main() -> None:
             with urllib.request.urlopen('http://127.0.0.1:5000/', timeout=3) as response:
                 if response.status == 200:
                     break
-        except (urllib.error.URLError, TimeoutError):
+                time.sleep(2)
+        except (urllib.error.URLError, TimeoutError, ConnectionError):
             time.sleep(2)
     else:
         sys.exit('MLflow server did not become reachable; inspect compose logs')
